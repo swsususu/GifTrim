@@ -62,33 +62,7 @@ struct TimelineView: View {
         let handleW: CGFloat = 10
 
         return ZStack(alignment: .topLeading) {
-            // Thumbnails (count adapts to width so each keeps the source aspect ratio).
-            let aspect = editor.source.size.width / max(1, editor.source.size.height)
-            let count = max(1, Int((width / (height * aspect)).rounded(.up)))
-            let thumbs = editor.thumbnails
-            HStack(spacing: 0) {
-                ForEach(0..<count, id: \.self) { i in
-                    let img = thumbs.isEmpty ? nil : thumbs[min(thumbs.count - 1, Int((Double(i) + 0.5) / Double(count) * Double(thumbs.count)))]
-                    Group {
-                        if let img {
-                            Image(decorative: img, scale: 1).resizable().aspectRatio(contentMode: .fill)
-                        } else {
-                            Color.black
-                        }
-                    }
-                    .frame(width: height * aspect, height: height)
-                    .clipped()
-                }
-            }
-            .frame(width: width, height: height, alignment: .leading)
-            .clipped()
-            .background(Color.black.opacity(0.6))
-            .clipShape(RoundedRectangle(cornerRadius: 6))
-            .contentShape(Rectangle())
-            .gesture(DragGesture(minimumDistance: 0).onChanged { v in
-                editor.pause()
-                editor.seek(to: Double(v.location.x / width) * duration)
-            })
+            thumbnailStrip(width: width, height: height, duration: duration)
 
             // Dim outside trim
             Rectangle().fill(Color.black.opacity(0.55))
@@ -117,6 +91,36 @@ struct TimelineView: View {
                 .offset(x: x(editor.currentTime) - 1, y: -4)
                 .allowsHitTesting(false)
         }
+    }
+
+    /// Thumbnails (count adapts to width so each keeps the source aspect ratio).
+    private func thumbnailStrip(width: CGFloat, height: CGFloat, duration: Double) -> some View {
+        let aspect: CGFloat = editor.source.size.width / max(1, editor.source.size.height)
+        let tileWidth: CGFloat = height * aspect
+        let count: Int = max(1, Int((width / tileWidth).rounded(.up)))
+        let thumbs: [CGImage] = editor.thumbnails
+        return HStack(spacing: 0) {
+            ForEach(0..<count, id: \.self) { i in
+                ThumbnailTile(image: Self.thumb(thumbs, tile: i, of: count))
+                    .frame(width: tileWidth, height: height)
+                    .clipped()
+            }
+        }
+        .frame(width: width, height: height, alignment: .leading)
+        .clipped()
+        .background(Color.black.opacity(0.6))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .contentShape(Rectangle())
+        .gesture(DragGesture(minimumDistance: 0).onChanged { v in
+            editor.pause()
+            editor.seek(to: Double(v.location.x / width) * duration)
+        })
+    }
+
+    private static func thumb(_ thumbs: [CGImage], tile i: Int, of count: Int) -> CGImage? {
+        guard !thumbs.isEmpty else { return nil }
+        let pos = (Double(i) + 0.5) / Double(count) * Double(thumbs.count)
+        return thumbs[min(thumbs.count - 1, Int(pos))]
     }
 
     private func handle(at offsetX: CGFloat, width: CGFloat, height: CGFloat, isStart: Bool,
@@ -152,5 +156,16 @@ struct TimelineView: View {
                 case .ended: NSCursor.arrow.set()
                 }
             }
+    }
+}
+
+private struct ThumbnailTile: View {
+    let image: CGImage?
+    var body: some View {
+        if let image {
+            Image(decorative: image, scale: 1).resizable().aspectRatio(contentMode: .fill)
+        } else {
+            Color.black
+        }
     }
 }

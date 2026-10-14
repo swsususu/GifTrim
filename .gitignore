@@ -1,0 +1,9 @@
+.DS_Store
+/.build/
+/build/
+/.swiftpm/
+/Vendor/lib/
+/Sources/CGifski/include/gifski.h.bak
+*.xcodeproj
+xcuserdata/
+DerivedData/

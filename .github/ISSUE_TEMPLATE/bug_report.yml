@@ -1,0 +1,22 @@
+name: Bug report / 问题反馈
+description: Something doesn't work / 功能异常
+labels: [bug]
+body:
+  - type: textarea
+    attributes:
+      label: What happened / 发生了什么
+      description: Steps to reproduce, expected vs actual. A screenshot or the input file helps. / 复现步骤、期望结果和实际结果，最好附上截图或素材。
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: GifTrim version / 版本
+      placeholder: "0.1.0"
+  - type: input
+    attributes:
+      label: macOS version and chip / 系统版本与芯片
+      placeholder: "macOS 15.3, M2"
+  - type: dropdown
+    attributes:
+      label: Where / 使用方式
+      options: [App, CLI, MCP / AI agent]

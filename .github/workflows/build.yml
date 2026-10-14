@@ -1,0 +1,74 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+
+      - name: Cache gifski
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            Vendor/gifski/target
+            Vendor/lib
+          key: gifski-${{ runner.os }}-${{ hashFiles('.gitmodules', 'scripts/build-gifski.sh') }}-${{ hashFiles('Vendor/gifski/Cargo.lock') }}
+
+      - name: Build libgifski
+        run: test -f Vendor/lib/libgifski.a || make gifski
+
+      - name: Test
+        run: make test
+
+      - name: Build app and DMG
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then VERSION="${GITHUB_REF_NAME#v}"; else VERSION="0.0.0-dev"; fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          make dmg VERSION="$VERSION"
+          hdiutil verify build/*.dmg
+          lipo -info build/GifTrim.app/Contents/MacOS/GifTrim build/GifTrim.app/Contents/Helpers/giftrim
+
+      - name: Smoke test CLI and MCP
+        run: |
+          G=build/GifTrim.app/Contents/Helpers/giftrim
+          $G make-test-video /tmp/t.mp4 --seconds 1
+          $G /tmp/t.mp4 -o /tmp/t.gif --width 160 --json
+          printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
+                        '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' | $G mcp | grep -q make_gif
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GifTrim-${{ env.VERSION }}
+          path: build/*.dmg
+
+      # Releases are created from the tag with notes from docs/releases/<tag>.md. If a release for
+      # the tag already exists (published by hand), its assets are left alone so the Homebrew
+      # cask checksum stays valid.
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "release $GITHUB_REF_NAME exists; not touching assets"
+            exit 0
+          fi
+          NOTES="docs/releases/${GITHUB_REF_NAME}.md"
+          if [ -f "$NOTES" ]; then ARGS=(--notes-file "$NOTES"); else ARGS=(--generate-notes); fi
+          gh release create "$GITHUB_REF_NAME" build/*.dmg --title "$GITHUB_REF_NAME" "${ARGS[@]}"

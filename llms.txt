@@ -1,0 +1,20 @@
+# GifTrim
+
+> Open-source macOS app, CLI (`giftrim`) and MCP server that turn videos, screen recordings, animated images (GIF/APNG/WebP) and image sequences into high-quality, small GIFs using the gifski encoder. It can trim, crop, resize, change speed, reverse/bounce, add captions and color effects, and fit a target file size. Everything runs locally. GPL-3.0.
+
+Install with `brew install --cask swsususu/tap/giftrim`, or download the DMG from GitHub Releases. The CLI lives at `/Applications/GifTrim.app/Contents/Helpers/giftrim`; Homebrew links it as `giftrim`.
+
+## Docs
+
+- [README](https://github.com/swsususu/GifTrim/blob/main/README.md): features, install, build
+- [AI / MCP guide](https://github.com/swsususu/GifTrim/blob/main/docs/AI.md): MCP config for Claude, Cursor, VS Code, Codex; tool list; JSON jobs
+- [Agent skill](https://github.com/swsususu/GifTrim/blob/main/skills/giftrim/SKILL.md): CLI workflow, options and size recipes for agents
+
+## Quick reference
+
+- `giftrim info <file> --json`: size, duration, fps, kind
+- `giftrim <input...> -o out.gif [--start s --end s --width px --fps n --speed x --mode forward|reverse|bounce --crop x,y,w,h --aspect 1:1 --text "…" --effect name --lossy n --target-size KB] --json`
+- `giftrim estimate <input...> [options] --json`: predicted size
+- `giftrim snapshot <input...> -o frame.png --at s [options]`: preview one edited frame
+- `giftrim run job.json|- --json`: JSON job (`giftrim schema` for the schema)
+- `giftrim mcp`: MCP stdio server. Tools: get_media_info, preview_frame, estimate_gif, make_gif

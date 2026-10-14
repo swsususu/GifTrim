@@ -6,18 +6,10 @@ import Testing
 
 /// Shared synthetic test video (generated once).
 enum Fixtures {
-    static let video: URL = {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("giftrim-test-\(ProcessInfo.processInfo.processIdentifier).mp4")
-        if !FileManager.default.fileExists(atPath: url.path) {
-            let sem = DispatchSemaphore(value: 0)
-            Task.detached {
-                try? await TestVideoGenerator.make(url: url, width: 320, height: 180, fps: 30, seconds: 2)
-                sem.signal()
-            }
-            sem.wait()
-        }
-        return url
-    }()
+    /// Generated once; async so it never blocks the cooperative thread pool.
+    static var video: URL {
+        get async throws { try await VideoFixture.shared.url() }
+    }
 
     static func tempGIF() -> URL {
         FileManager.default.temporaryDirectory.appendingPathComponent("giftrim-test-\(UUID().uuidString).gif")
@@ -43,6 +35,23 @@ enum Fixtures {
     }
 }
 
+actor VideoFixture {
+    static let shared = VideoFixture()
+    private var task: Task<URL, Error>?
+
+    func url() async throws -> URL {
+        if let task { return try await task.value }
+        let t = Task {
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("giftrim-test-\(ProcessInfo.processInfo.processIdentifier).mp4")
+            try await TestVideoGenerator.make(url: url, width: 320, height: 180, fps: 30, seconds: 2)
+            return url
+        }
+        task = t
+        return try await t.value
+    }
+}
+
 @Suite struct FramePlannerTests {
     @Test func delaysAreQuantizedAndPreserveDuration() {
         let frames = (0..<30).map { PlannedFrame(sourceTime: Double($0) / 30, delay: 1.0 / 30) }
@@ -60,7 +69,7 @@ enum Fixtures {
     }
 
     @Test func planRespectsTrimFpsSpeedAndModes() async throws {
-        let source = try await MediaSource.open(urls: [Fixtures.video])
+        let source = try await MediaSource.open(urls: [try await Fixtures.video])
         var p = Project(sourceURL: source.url, trimStart: 0.5, trimEnd: 1.5)
         p.settings.fps = 10
         let forward = FramePlanner.plan(project: p, source: source)
@@ -120,7 +129,7 @@ enum Fixtures {
 
 @Suite(.serialized) struct ExportTests {
     @Test func exportsVideoWithCorrectOrientationAndTiming() async throws {
-        let source = try await MediaSource.open(urls: [Fixtures.video])
+        let source = try await MediaSource.open(urls: [try await Fixtures.video])
         var p = Project(sourceURL: source.url, trimStart: 0, trimEnd: 1)
         p.settings.width = 160
         p.settings.fps = 10
@@ -138,7 +147,7 @@ enum Fixtures {
     }
 
     @Test func textOverlayIsDrawnAtBottom() async throws {
-        let source = try await MediaSource.open(urls: [Fixtures.video])
+        let source = try await MediaSource.open(urls: [try await Fixtures.video])
         var p = Project(sourceURL: source.url, trimStart: 0, trimEnd: 0.2)
         p.settings.width = 320
         p.settings.fps = 10
@@ -158,7 +167,7 @@ enum Fixtures {
     }
 
     @Test func bounceAndGifInput() async throws {
-        let source = try await MediaSource.open(urls: [Fixtures.video])
+        let source = try await MediaSource.open(urls: [try await Fixtures.video])
         var p = Project(sourceURL: source.url, trimStart: 0, trimEnd: 1)
         p.settings.width = 120
         p.settings.fps = 10
@@ -183,7 +192,7 @@ enum Fixtures {
     }
 
     @Test func estimateIsInTheRightBallpark() async throws {
-        let source = try await MediaSource.open(urls: [Fixtures.video])
+        let source = try await MediaSource.open(urls: [try await Fixtures.video])
         var p = Project(sourceURL: source.url, trimStart: 0, trimEnd: 2)
         p.settings.width = 160
         p.settings.fps = 10
@@ -196,7 +205,7 @@ enum Fixtures {
     }
 
     @Test func cancellationStopsExport() async throws {
-        let source = try await MediaSource.open(urls: [Fixtures.video])
+        let source = try await MediaSource.open(urls: [try await Fixtures.video])
         var p = Project(sourceURL: source.url, trimStart: 0, trimEnd: 2)
         p.settings.width = 320
         p.settings.fps = 30
@@ -210,8 +219,8 @@ enum Fixtures {
 
 @Suite struct JobSpecTests {
     @Test func validatesAndBuildsProject() async throws {
-        let source = try await MediaSource.open(urls: [Fixtures.video])
-        var spec = JobSpec(inputs: [Fixtures.video.path])
+        let source = try await MediaSource.open(urls: [try await Fixtures.video])
+        var spec = JobSpec(inputs: [try await Fixtures.video.path])
         spec.aspect = "1:1"
         spec.mode = "bounce"
         spec.texts = [JobSpec.TextSpec(text: "你好")]
@@ -240,7 +249,8 @@ enum Fixtures {
     @Test func runsFromJSON() async throws {
         let out = Fixtures.tempGIF()
         defer { try? FileManager.default.removeItem(at: out) }
-        let json = #"{"inputs":["\#(Fixtures.video.path)"],"output":"\#(out.path)","width":100,"end":0.5,"fps":10}"#
+        let video = try await Fixtures.video
+        let json = #"{"inputs":["\#(video.path)"],"output":"\#(out.path)","width":100,"end":0.5,"fps":10}"#
         let spec = try JSONDecoder().decode(JobSpec.self, from: Data(json.utf8))
         let r = try await JobRunner.run(spec)
         #expect(r.width == 100 && r.frames == 5)

@@ -40,6 +40,7 @@ jobs:
         run: test -f Vendor/lib/libgifski.a || make gifski
 
       - name: Test
+        timeout-minutes: 10
         run: make test
 
       - name: Build app and DMG

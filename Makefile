@@ -1,4 +1,4 @@
-VERSION ?= 0.1.0
+VERSION ?= 0.1.1
 SDK := $(shell scripts/sdk.sh)
 # Command Line Tools keep the swift-testing macro plugin in a subfolder the driver doesn't search.
 TESTING_PLUGIN := $(wildcard $(shell xcode-select -p)/usr/lib/swift/host/plugins/testing/libTestingMacros.dylib)

@@ -106,6 +106,7 @@ enum AppSettings {
             "stillFrameDuration": 0.5,
             "recordShowCursor": true,
             "recordFPS": 30,
+            "autoCheckUpdates": true,
         ])
     }
 
@@ -115,6 +116,7 @@ enum AppSettings {
     static var stillFrameDuration: Double { d.double(forKey: "stillFrameDuration") }
     static var recordShowCursor: Bool { d.bool(forKey: "recordShowCursor") }
     static var recordFPS: Int { d.integer(forKey: "recordFPS") }
+    static var autoCheckUpdates: Bool { d.bool(forKey: "autoCheckUpdates") }
 
     /// Folder used for recordings (kept so users can re-open them).
     static var recordingsFolder: URL {

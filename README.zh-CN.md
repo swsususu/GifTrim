@@ -181,13 +181,13 @@ cd GifTrim
 make gifski   # 编译通用 libgifski.a
 make test     # 运行单元测试
 make app      # 生成 build/GifTrim.app
-make dmg      # 生成 build/GifTrim_0.1.0_universal.dmg
+make dmg      # 生成 build/GifTrim_0.1.1_universal.dmg
 ```
 
 ## 路线图
 
 - [ ] Developer ID 签名与公证
-- [ ] Sparkle 自动更新
+- [x] 应用内检查更新（GifTrim → 检查更新…）
 - [ ] 英文界面（命令行和 MCP 已经是英文）
 - [ ] 项目保存与恢复
 - [ ] 导出 MP4 / WebP / APNG

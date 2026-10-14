@@ -188,7 +188,7 @@ cd GifTrim
 make gifski   # universal libgifski.a
 make test     # unit tests
 make app      # build/GifTrim.app (universal, hardened runtime)
-make dmg      # build/GifTrim_0.1.0_universal.dmg
+make dmg      # build/GifTrim_0.1.1_universal.dmg
 ```
 
 `APP_ARCHS=arm64 make app` builds only for Apple Silicon. `CODESIGN_IDENTITY="Developer ID…"`
@@ -206,7 +206,7 @@ Vendor/gifski         gifski 1.34.0 (submodule)
 ## Roadmap
 
 - [ ] Developer ID signing and notarisation
-- [ ] Sparkle auto-update
+- [x] In-app update check (GifTrim → Check for Updates…)
 - [ ] English UI (the app is Chinese-first today; the CLI and MCP are in English)
 - [ ] Save and restore projects
 - [ ] Export MP4 / WebP / APNG

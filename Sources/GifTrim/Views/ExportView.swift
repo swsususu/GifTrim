@@ -171,6 +171,7 @@ struct SettingsView: View {
     @AppStorage("stillFrameDuration") private var stillFrameDuration = 0.5
     @AppStorage("recordShowCursor") private var recordShowCursor = true
     @AppStorage("recordFPS") private var recordFPS = 30
+    @AppStorage("autoCheckUpdates") private var autoCheckUpdates = true
 
     var body: some View {
         Form {
@@ -190,6 +191,12 @@ struct SettingsView: View {
                 }
                 LabeledContent("录像保存位置") {
                     Button("在访达中打开") { NSWorkspace.shared.open(AppSettings.recordingsFolder) }
+                }
+            }
+            Section("更新") {
+                Toggle("启动时自动检查更新", isOn: $autoCheckUpdates)
+                LabeledContent("当前版本 \(UpdateChecker.currentVersion)") {
+                    Button("检查更新") { Task { await UpdateChecker.shared.check(silent: false) } }
                 }
             }
         }

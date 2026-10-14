@@ -15,6 +15,9 @@ struct GifTrimApp: App {
         }
         .defaultSize(width: 1200, height: 780)
         .commands {
+            CommandGroup(after: .appInfo) {
+                Button("检查更新…") { Task { await UpdateChecker.shared.check(silent: false) } }
+            }
             CommandGroup(replacing: .newItem) {
                 Button("打开…") { model.showOpenPanel() }
                     .keyboardShortcut("o")
@@ -79,6 +82,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Developer convenience: GIFTRIM_OPEN=/path/file opens a file at launch.
         if let path = ProcessInfo.processInfo.environment["GIFTRIM_OPEN"] {
             Task { @MainActor in AppModel.shared.open(urls: [URL(fileURLWithPath: path)]) }
+        }
+        Task { @MainActor in
+            AppSettings.register()
+            UpdateChecker.shared.checkAtLaunch()
         }
     }
 

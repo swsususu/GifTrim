@@ -25,6 +25,8 @@ cask "giftrim" do
 
       xattr -dr com.apple.quarantine /Applications/GifTrim.app
 
+    Until then the `giftrim` command may also be killed on launch.
+
     Use it from AI assistants (MCP):
 
       claude mcp add giftrim -- giftrim mcp

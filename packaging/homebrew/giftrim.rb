@@ -1,8 +1,8 @@
 cask "giftrim" do
   # Update both on every release. Get the checksum from the published asset:
   #   shasum -a 256 GifTrim_<version>_universal.dmg
-  version "0.1.1"
-  sha256 "6c3a895cc9e75f2f5627ef7165b9b56b3ea24110f6228aef422e4d5d2ce339f1"
+  version "0.1.2"
+  sha256 "f0be6fd2bdfff46e76450c890514d9b154e31c17c503c454a2290f7dcf01dd34"
 
   url "https://github.com/swsususu/GifTrim/releases/download/v#{version}/GifTrim_#{version}_universal.dmg"
   name "GifTrim"

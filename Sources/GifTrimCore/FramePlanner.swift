@@ -76,11 +76,12 @@ public enum FramePlanner {
         return result
     }
 
-    /// Presentation timestamps for the planned frames (PTS of frame 0 is 0).
+    /// Presentation timestamps for the planned frames. gifski takes a first PTS > 0 as the delay of the
+    /// last frame (and shifts the whole animation back), so every PTS is offset by the last frame's delay.
     public static func presentationTimes(_ frames: [PlannedFrame]) -> [Double] {
         var pts: [Double] = []
         pts.reserveCapacity(frames.count)
-        var t = 0.0
+        var t = frames.last?.delay ?? 0
         for f in frames {
             pts.append(t)
             t += f.delay

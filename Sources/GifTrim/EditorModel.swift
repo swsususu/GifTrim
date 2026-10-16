@@ -89,6 +89,7 @@ final class EditorModel {
             let item = AVPlayerItem(url: source.url)
             player = AVPlayer(playerItem: item)
             player?.actionAtItemEnd = .pause
+            player?.isMuted = true
         } else {
             player = nil
         }
@@ -145,6 +146,7 @@ final class EditorModel {
                 seek(to: currentTime)
             }
         }
+        if isPlaying, let player, player.rate != previewRate { player.rate = previewRate }
         // Keep trim sane.
         if project.trimEnd > source.duration { project.trimEnd = source.duration }
         if project.trimStart < 0 { project.trimStart = 0 }
@@ -186,8 +188,14 @@ final class EditorModel {
         }
     }
 
-    /// AVPlayer preview rate (clamped to what it plays smoothly).
-    private var previewRate: Float { Float(max(0.1, min(project.settings.speed, 2))) }
+    /// AVPlayer preview rate (clamped to what the item can play).
+    private var previewRate: Float {
+        let maxRate: Double = player?.currentItem?.canPlayFastForward == true ? 4 : 2
+        return Float(max(0.1, min(project.settings.speed, maxRate)))
+    }
+
+    /// Shortest allowed trim range in seconds (shared with the timeline handles).
+    static let minTrimLength = 0.05
 
     func togglePlay() { isPlaying ? pause() : play() }
 
@@ -200,7 +208,7 @@ final class EditorModel {
             player.playImmediately(atRate: previewRate)
         } else {
             var last = Date()
-            playTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
+            let timer = Timer(timeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
                 MainActor.assumeIsolated {
                     guard let self else { return }
                     let now = Date()
@@ -210,6 +218,9 @@ final class EditorModel {
                     self.setDiscreteTime(t)
                 }
             }
+            // .common so playback keeps running while sliders / scrollers track the mouse.
+            RunLoop.main.add(timer, forMode: .common)
+            playTimer = timer
         }
     }
 
@@ -224,7 +235,7 @@ final class EditorModel {
         let t = max(0, min(time, source.duration))
         if let player {
             currentTime = t
-            player.seek(to: CMTime(seconds: t, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+            player.seek(to: CMTime(seconds: t, preferredTimescale: 60000), toleranceBefore: .zero, toleranceAfter: .zero)
         } else {
             setDiscreteTime(t)
         }
@@ -246,18 +257,32 @@ final class EditorModel {
         if source.isDiscrete, let times = source.nativeFrameTimes {
             let i = max(0, min(times.count - 1, discreteIndex(currentTime) + delta))
             seek(to: times[i])
+        } else if let player {
+            // Snap to the frame grid, then seek a quarter frame in so the exact-time seek lands on
+            // the intended frame despite timescale rounding (29.97 fps etc.).
+            let step = frameStep
+            let last = max(0, Int((source.duration / step).rounded(.up)) - 1)
+            let index = max(0, min(last, Int((currentTime / step + 0.01).rounded(.down)) + delta))
+            let t = Double(index) * step
+            currentTime = t
+            player.seek(to: CMTime(seconds: t + step * 0.25, preferredTimescale: 60000),
+                        toleranceBefore: .zero, toleranceAfter: .zero)
         } else {
             seek(to: currentTime + Double(delta) * frameStep)
         }
     }
 
     func setTrimStartToCurrent() {
-        project.trimStart = min(currentTime, project.trimEnd)
+        guard !isFrameEditing else { return }
+        let minLen = min(Self.minTrimLength, source.duration)
+        project.trimStart = max(0, min(currentTime, project.trimEnd - minLen))
         projectDidChange()
     }
 
     func setTrimEndToCurrent() {
-        project.trimEnd = max(currentTime, project.trimStart)
+        guard !isFrameEditing else { return }
+        let minLen = min(Self.minTrimLength, source.duration)
+        project.trimEnd = min(source.duration, max(currentTime, project.trimStart + minLen))
         projectDidChange()
     }
 
@@ -294,6 +319,8 @@ final class EditorModel {
         Task {
             if let img = try? await source.image(at: time, maxDimension: 140) {
                 frameThumbs[time] = img
+            } else {
+                loadingThumbs.remove(time) // allow a retry on the next request
             }
         }
         return nil

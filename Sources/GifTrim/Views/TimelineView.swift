@@ -5,6 +5,9 @@ import SwiftUI
 struct TimelineView: View {
     @Bindable var editor: EditorModel
     @State private var dragStartValue: Double?
+    @State private var dragTarget: DragTarget?
+
+    private enum DragTarget { case start, end, scrub }
 
     var body: some View {
         VStack(spacing: 8) {
@@ -80,8 +83,8 @@ struct TimelineView: View {
                 .offset(x: startX)
                 .allowsHitTesting(false)
 
-            handle(at: startX - handleW / 2 + 2, width: handleW, height: height, isStart: true, total: width, duration: duration)
-            handle(at: endX - handleW / 2 - 2, width: handleW, height: height, isStart: false, total: width, duration: duration)
+            handle(at: startX - handleW / 2 + 2, width: handleW, height: height)
+            handle(at: endX - handleW / 2 - 2, width: handleW, height: height)
 
             // Playhead
             Rectangle()
@@ -91,13 +94,56 @@ struct TimelineView: View {
                 .offset(x: x(editor.currentTime) - 1, y: -4)
                 .allowsHitTesting(false)
         }
+        .frame(width: width, height: height, alignment: .topLeading)
+        // Extend the hit area past the edges so a handle sitting at 0 or the end is easy to grab.
+        .contentShape(Rectangle().inset(by: -10))
+        // One gesture for the whole strip: it picks the handle nearest to where the drag starts,
+        // so sibling gestures can't steal it (the start handle used to lose to the scrubber).
+        .gesture(DragGesture(minimumDistance: 0)
+            .onChanged { v in
+                editor.pause()
+                if dragTarget == nil {
+                    let x0 = v.startLocation.x
+                    let dStart = abs(x0 - startX)
+                    let dEnd = abs(x0 - endX)
+                    let grab: CGFloat = 12
+                    if dStart <= grab || dEnd <= grab {
+                        // Overlapping handles: pick by side, so a collapsed range can still be widened.
+                        let pickStart = dStart < dEnd || (dStart == dEnd && x0 <= startX)
+                        dragTarget = pickStart ? .start : .end
+                        dragStartValue = pickStart ? editor.project.trimStart : editor.project.trimEnd
+                    } else {
+                        dragTarget = .scrub
+                    }
+                }
+                let minLen = min(EditorModel.minTrimLength, duration)
+                switch dragTarget {
+                case .start:
+                    let t = (dragStartValue ?? 0) + Double(v.translation.width / width) * duration
+                    editor.project.trimStart = max(0, min(t, editor.project.trimEnd - minLen))
+                    editor.seek(to: editor.project.trimStart)
+                case .end:
+                    let t = (dragStartValue ?? 0) + Double(v.translation.width / width) * duration
+                    editor.project.trimEnd = min(duration, max(t, editor.project.trimStart + minLen))
+                    editor.seek(to: editor.project.trimEnd)
+                case .scrub, nil:
+                    editor.seek(to: Double(v.location.x / width) * duration)
+                }
+            }
+            .onEnded { _ in
+                let wasTrim = dragTarget == .start || dragTarget == .end
+                dragTarget = nil
+                dragStartValue = nil
+                if wasTrim { editor.projectDidChange() }
+            })
     }
 
     /// Thumbnails (count adapts to width so each keeps the source aspect ratio).
     private func thumbnailStrip(width: CGFloat, height: CGFloat, duration: Double) -> some View {
         let aspect: CGFloat = editor.source.size.width / max(1, editor.source.size.height)
-        let tileWidth: CGFloat = height * aspect
-        let count: Int = max(1, Int((width / tileWidth).rounded(.up)))
+        let tileWidth: CGFloat = max(1, height * aspect)
+        let rawCount: CGFloat = height > 1 && width.isFinite ? (width / tileWidth).rounded(.up) : 1
+        let count: Int = Int(min(200, max(1, rawCount)))
         let thumbs: [CGImage] = editor.thumbnails
         return HStack(spacing: 0) {
             ForEach(0..<count, id: \.self) { i in
@@ -110,11 +156,6 @@ struct TimelineView: View {
         .clipped()
         .background(Color.black.opacity(0.6))
         .clipShape(RoundedRectangle(cornerRadius: 6))
-        .contentShape(Rectangle())
-        .gesture(DragGesture(minimumDistance: 0).onChanged { v in
-            editor.pause()
-            editor.seek(to: Double(v.location.x / width) * duration)
-        })
     }
 
     private static func thumb(_ thumbs: [CGImage], tile i: Int, of count: Int) -> CGImage? {
@@ -123,33 +164,12 @@ struct TimelineView: View {
         return thumbs[min(thumbs.count - 1, Int(pos))]
     }
 
-    private func handle(at offsetX: CGFloat, width: CGFloat, height: CGFloat, isStart: Bool,
-                        total: CGFloat, duration: Double) -> some View {
+    private func handle(at offsetX: CGFloat, width: CGFloat, height: CGFloat) -> some View {
         RoundedRectangle(cornerRadius: 3)
             .fill(Color.yellow)
             .overlay(Capsule().fill(Color.black.opacity(0.5)).frame(width: 2, height: height * 0.4))
             .frame(width: width, height: height)
             .offset(x: offsetX)
-            .gesture(DragGesture(minimumDistance: 0)
-                .onChanged { v in
-                    editor.pause()
-                    if dragStartValue == nil {
-                        dragStartValue = isStart ? editor.project.trimStart : editor.project.trimEnd
-                    }
-                    let t = (dragStartValue ?? 0) + Double(v.translation.width / total) * duration
-                    let minLen = min(0.05, duration)
-                    if isStart {
-                        editor.project.trimStart = max(0, min(t, editor.project.trimEnd - minLen))
-                        editor.seek(to: editor.project.trimStart)
-                    } else {
-                        editor.project.trimEnd = min(duration, max(t, editor.project.trimStart + minLen))
-                        editor.seek(to: editor.project.trimEnd)
-                    }
-                }
-                .onEnded { _ in
-                    dragStartValue = nil
-                    editor.projectDidChange()
-                })
             .onContinuousHover { phase in
                 switch phase {
                 case .active: NSCursor.resizeLeftRight.set()

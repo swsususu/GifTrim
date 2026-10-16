@@ -16,6 +16,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          fetch-depth: 0
 
       - name: Select newest Xcode
         run: |
@@ -78,4 +79,6 @@ jobs:
           fi
           NOTES="docs/releases/${GITHUB_REF_NAME}.md"
           if [ -f "$NOTES" ]; then ARGS=(--notes-file "$NOTES"); else ARGS=(--generate-notes); fi
-          gh release create "$GITHUB_REF_NAME" build/*.dmg --title "$GITHUB_REF_NAME" "${ARGS[@]}"
+          # The in-app updater verifies `<dmg>.sha256` when present.
+          for f in build/*.dmg; do (cd build && shasum -a 256 "$(basename "$f")" > "$(basename "$f").sha256"); done
+          gh release create "$GITHUB_REF_NAME" build/*.dmg build/*.dmg.sha256 --title "$GITHUB_REF_NAME" "${ARGS[@]}"

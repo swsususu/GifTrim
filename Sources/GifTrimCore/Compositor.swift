@@ -257,7 +257,7 @@ struct TextLayout {
             NSAttributedString.Key(kCTFontAttributeName as String): font,
             NSAttributedString.Key(kCTForegroundColorAttributeName as String): text.strokeColor.cgColor,
         ]
-        let rawLines = text.text.components(separatedBy: .newlines)
+        let rawLines = text.text.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).map(String.init)
         let ascent = CTFontGetAscent(font)
         let descent = CTFontGetDescent(font)
         let leading = max(CTFontGetLeading(font), fontSize * 0.1)

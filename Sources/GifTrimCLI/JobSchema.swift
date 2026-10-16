@@ -1,4 +1,5 @@
 import Foundation
+import GifTrimCore
 
 /// JSON Schema for `JobSpec`, shared by `giftrim schema` and the MCP tool definitions.
 enum JobSchema {
@@ -53,6 +54,31 @@ enum JobSchema {
                            "description": "Absolute paths. One video (mov/mp4/m4v…), one animated image (gif/apng/webp), or several still images that become frames in filename order."]
         props["output"] = ["type": "string", "description": "Absolute path of the GIF to write (default: next to the input, .gif extension)."]
         return ["type": "object", "required": ["inputs"], "properties": props, "additionalProperties": false]
+    }
+
+    /// Rejects keys that the schema does not declare (additionalProperties: false), including inside `crop` and `texts`.
+    /// `extra` lists additional allowed top-level keys (e.g. `at` for preview_frame).
+    static func rejectUnknownFields(in data: Data, allowing extra: Set<String> = []) throws {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        try rejectUnknownFields(in: object, allowing: extra)
+    }
+
+    static func rejectUnknownFields(in object: [String: Any], allowing extra: Set<String> = []) throws {
+        func check(_ dict: [String: Any], _ allowed: Set<String>, _ path: String) throws {
+            if let unknown = dict.keys.filter({ !allowed.contains($0) }).sorted().first {
+                throw JobError.invalid("unknown field \(path.isEmpty ? "" : path + ".")\(unknown)")
+            }
+        }
+        try check(object, Set((jobSchema["properties"] as? [String: Any] ?? [:]).keys).union(extra), "")
+        if let crop = object["crop"] as? [String: Any] {
+            try check(crop, ["x", "y", "width", "height"], "crop")
+        }
+        if let texts = object["texts"] as? [Any] {
+            let allowed = Set((textItem["properties"] as? [String: Any] ?? [:]).keys)
+            for (i, t) in texts.enumerated() {
+                if let t = t as? [String: Any] { try check(t, allowed, "texts[\(i)]") }
+            }
+        }
     }
 
     static var json: String {

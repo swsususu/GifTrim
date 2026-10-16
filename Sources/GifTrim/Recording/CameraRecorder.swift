@@ -13,6 +13,7 @@ final class CameraRecorder: NSObject {
     var authorized = false
     var errorMessage: String?
     var elapsed: Double = 0
+    private(set) var hasInput = false
 
     let session = AVCaptureSession()
     @ObservationIgnored private let output = AVCaptureMovieFileOutput()
@@ -79,9 +80,12 @@ final class CameraRecorder: NSObject {
         session.beginConfiguration()
         if let currentInput { session.removeInput(currentInput) }
         currentInput = nil
+        hasInput = false
         if let input = try? AVCaptureDeviceInput(device: device), session.canAddInput(input) {
             session.addInput(input)
             currentInput = input
+            hasInput = true
+            errorMessage = nil
         } else {
             errorMessage = "无法使用设备：\(device.localizedName)"
         }
@@ -109,11 +113,14 @@ final class CameraRecorder: NSObject {
             output.stopRecording()
             return
         }
+        guard currentInput != nil, let connection = output.connection(with: .video) else {
+            errorMessage = "摄像头尚未就绪，无法开始录制。请重新选择设备。"
+            return
+        }
+        errorMessage = nil
         finishHandler = onFinish
         let url = AppSettings.newRecordingURL(prefix: "摄像头录制")
-        if let connection = output.connection(with: .video) {
-            output.setOutputSettings([AVVideoCodecKey: AVVideoCodecType.h264], for: connection)
-        }
+        output.setOutputSettings([AVVideoCodecKey: AVVideoCodecType.h264], for: connection)
         output.startRecording(to: url, recordingDelegate: self)
         isRecording = true
         elapsed = 0
@@ -132,10 +139,16 @@ extension CameraRecorder: AVCaptureFileOutputRecordingDelegate {
         Task { @MainActor in
             self.isRecording = false
             self.timer?.invalidate()
-            if !ok { self.errorMessage = error?.localizedDescription }
+            if !ok {
+                // Keep the sheet open and show the error; drop the partial file.
+                try? FileManager.default.removeItem(at: outputFileURL)
+                self.finishHandler = nil
+                self.errorMessage = "录制失败：" + (error?.localizedDescription ?? "未知错误")
+                return
+            }
             let handler = self.finishHandler
             self.finishHandler = nil
-            handler?(ok ? outputFileURL : nil)
+            handler?(outputFileURL)
         }
     }
 }
@@ -204,7 +217,7 @@ struct CameraRecorderView: View {
                 }
                 .keyboardShortcut(.defaultAction)
                 .tint(recorder.isRecording ? .red : nil)
-                .disabled(!recorder.authorized || recorder.selectedID == nil)
+                .disabled(!recorder.authorized || recorder.selectedID == nil || !recorder.hasInput)
             }
         }
         .padding(20)

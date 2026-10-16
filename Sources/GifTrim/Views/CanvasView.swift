@@ -124,6 +124,33 @@ struct Checkerboard: View {
 
 // MARK: - Overlays (text & images)
 
+/// Avoids re-decoding overlay images on every playback tick (main thread only, used from view bodies).
+@MainActor
+private enum OverlayCache {
+    private static var aspects: [UUID: (bytes: Int, aspect: Double)] = [:]
+    private static var key: (texts: [TextOverlay], images: [ImageOverlay], source: CGSize, output: CGSize)?
+    private static var cached: Compositor?
+
+    /// Height / width of the overlay image.
+    static func aspect(of overlay: ImageOverlay) -> Double {
+        if let hit = aspects[overlay.id], hit.bytes == overlay.imageData.count { return hit.aspect }
+        var aspect = 1.0
+        if let img = NSImage(data: overlay.imageData), img.size.width > 0 { aspect = img.size.height / img.size.width }
+        aspects[overlay.id] = (overlay.imageData.count, aspect)
+        return aspect
+    }
+
+    /// Reuses the compositor (and its decoded images) while only the time changes.
+    static func compositor(project: Project, sourceSize: CGSize, outputSize: CGSize) -> Compositor {
+        if let k = key, let c = cached, k.texts == project.texts, k.images == project.images,
+           k.source == sourceSize, k.output == outputSize { return c }
+        let c = Compositor(project: project, sourceSize: sourceSize, outputSize: outputSize)
+        key = (project.texts, project.images, sourceSize, outputSize)
+        cached = c
+        return c
+    }
+}
+
 private struct OverlayEditor: View {
     @Bindable var editor: EditorModel
     let rect: CGRect
@@ -189,17 +216,14 @@ private struct OverlayEditor: View {
         guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
                                   space: CGColorSpace(name: CGColorSpace.sRGB)!,
                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
-        let compositor = Compositor(project: project, sourceSize: editor.source.size,
-                                    outputSize: CGSize(width: w, height: h))
+        let compositor = OverlayCache.compositor(project: project, sourceSize: editor.source.size,
+                                                 outputSize: CGSize(width: w, height: h))
         compositor.drawOverlays(in: ctx, size: CGSize(width: w, height: h), time: editor.currentTime)
         return ctx.makeImage()
     }
 
     private func imageBounds(_ overlay: ImageOverlay, size: CGSize) -> NormalizedRect {
-        let aspect: Double = {
-            guard let img = NSImage(data: overlay.imageData), img.size.width > 0 else { return 1 }
-            return img.size.height / img.size.width
-        }()
+        let aspect = OverlayCache.aspect(of: overlay)
         let w = overlay.width
         let h = w * aspect * size.width / max(1, size.height)
         return NormalizedRect(x: overlay.position.x - w / 2, y: overlay.position.y - h / 2, width: w, height: h)
@@ -369,10 +393,18 @@ private struct CropOverlay: View {
                 ([.topLeft, .topRight, .bottomLeft, .bottomRight].contains(handle) && abs(dx) >= abs(dy))
             var w = r.width, hgt = r.height
             if horizontalDriven { hgt = w / normAspect } else { w = hgt * normAspect }
-            if hgt > 1 { hgt = 1; w = hgt * normAspect }
-            if w > 1 { w = 1; hgt = w / normAspect }
             let anchorRight = [.topLeft, .left, .bottomLeft].contains(handle)
             let anchorBottom = [.topLeft, .top, .topRight].contains(handle)
+            // Clamp to the space available from the fixed corner/edge, then derive the other
+            // dimension from the ratio (never translate the rect to make it fit).
+            let availW = (handle == .top || handle == .bottom)
+                ? 2 * min(s.x + s.width / 2, 1 - (s.x + s.width / 2))
+                : (anchorRight ? s.x + s.width : 1 - s.x)
+            let availH = (handle == .left || handle == .right)
+                ? 2 * min(s.y + s.height / 2, 1 - (s.y + s.height / 2))
+                : (anchorBottom ? s.y + s.height : 1 - s.y)
+            w = min(w, availW, availH * normAspect)
+            hgt = w / normAspect
             var x = anchorRight ? (s.x + s.width) - w : s.x
             var y = anchorBottom ? (s.y + s.height) - hgt : s.y
             if handle == .top || handle == .bottom { x = s.x + s.width / 2 - w / 2 }

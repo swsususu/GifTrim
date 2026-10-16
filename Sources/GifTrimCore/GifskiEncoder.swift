@@ -94,7 +94,6 @@ public final class GifskiEncoder: @unchecked Sendable {
         guard status == GIFSKI_OK else {
             _ = gifski_finish(handle)
             self.handle = nil
-            Unmanaged<EncoderContext>.fromOpaque(contextPointer).release()
             throw GifTrimError.encodeFailed(Self.describe(status))
         }
     }

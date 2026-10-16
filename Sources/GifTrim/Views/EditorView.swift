@@ -35,19 +35,23 @@ struct EditorView: View {
     private func installKeyMonitor() {
         guard keyMonitor == nil else { return }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [editor] event in
-            if let responder = event.window?.firstResponder, responder is NSText { return event }
-            if event.window?.attachedSheet != nil || event.window?.isSheet == true { return event }
-            let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting([.numericPad, .function])
+            // Only the editor's main window: not open/save/color panels, sheets or other windows.
+            guard NSApp.modalWindow == nil, let window = event.window,
+                  window === NSApp.mainWindow, !(window is NSPanel),
+                  window.attachedSheet == nil, !window.isSheet else { return event }
+            if window.firstResponder is NSText { return event }
+            let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+                .subtracting([.numericPad, .function, .capsLock])
             guard mods.isEmpty else { return event }
             switch event.keyCode {
-            case 49: editor.togglePlay(); return nil // space
+            case 49: if !event.isARepeat { editor.togglePlay() }; return nil // space
             case 123: editor.step(-1); return nil // left
             case 124: editor.step(1); return nil // right
             default: break
             }
             switch event.charactersIgnoringModifiers?.lowercased() {
-            case "i": editor.setTrimStartToCurrent(); return nil
-            case "o": editor.setTrimEndToCurrent(); return nil
+            case "i": if !event.isARepeat { editor.setTrimStartToCurrent() }; return nil
+            case "o": if !event.isARepeat { editor.setTrimEndToCurrent() }; return nil
             default: return event
             }
         }

@@ -8,6 +8,8 @@ final class MCPServer: @unchecked Sendable {
     private let writeLock = NSLock()
     private let tasksLock = NSLock()
     private var tasks: [String: Task<Void, Never>] = [:]
+    /// Keys of in-flight requests that were cancelled: they keep running until they stop, but get no response.
+    private var cancelled: Set<String> = []
     private static let supportedVersions = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
 
     func run() async {
@@ -43,23 +45,48 @@ final class MCPServer: @unchecked Sendable {
         send(["jsonrpc": "2.0", "id": id, "error": ["code": code, "message": message]])
     }
 
-    private func key(_ id: Any) -> String { "\(id)" }
+    /// Type-aware so that string "1" and number 1 are different requests.
+    private func key(_ id: Any) -> String { id is String ? "s:\(id)" : "n:\(id)" }
 
     private func handle(line: String) {
         guard let data = line.data(using: .utf8),
-              let message = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+              let parsed = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) else {
             send(["jsonrpc": "2.0", "id": NSNull(), "error": ["code": -32700, "message": "Parse error"]])
+            return
+        }
+        guard let message = parsed as? [String: Any] else {
+            replyError(NSNull(), code: -32600, message: "Invalid Request: expected a JSON-RPC request object")
             return
         }
         let method = message["method"] as? String
         let id = message["id"]
         let params = message["params"] as? [String: Any] ?? [:]
 
-        guard let method else { return } // responses to our own requests: none expected
+        if id is NSNull {
+            replyError(NSNull(), code: -32600, message: "Invalid Request: id must not be null")
+            return
+        }
+        if let id, !(id is String), !(id is NSNumber) || CFGetTypeID(id as CFTypeRef) == CFBooleanGetTypeID() {
+            replyError(NSNull(), code: -32600, message: "Invalid Request: id must be a string or number")
+            return
+        }
+        guard let method else {
+            // Responses to our own requests (none expected) are ignored; anything else with an id is invalid.
+            if let id, message["result"] == nil, message["error"] == nil {
+                replyError(id, code: -32600, message: "Invalid Request: missing method")
+            }
+            return
+        }
         guard let id else {
             // Notifications.
             if method == "notifications/cancelled", let rid = params["requestId"] {
-                tasksLock.withLock { tasks.removeValue(forKey: key(rid)) }?.cancel()
+                let k = key(rid)
+                tasksLock.withLock {
+                    if let task = tasks[k] {
+                        cancelled.insert(k)
+                        task.cancel()
+                    }
+                }
             }
             return
         }
@@ -80,6 +107,10 @@ final class MCPServer: @unchecked Sendable {
             reply(id, result: ["tools": Self.tools])
         case "tools/call":
             let name = params["name"] as? String ?? ""
+            guard Self.tools.contains(where: { $0["name"] as? String == name }) else {
+                replyError(id, code: -32602, message: "Unknown tool: \(name)")
+                return
+            }
             let arguments = params["arguments"] as? [String: Any] ?? [:]
             let progressToken = (params["_meta"] as? [String: Any])?["progressToken"]
             // Register before starting so a fast tool can't finish before it is tracked.
@@ -96,9 +127,12 @@ final class MCPServer: @unchecked Sendable {
         }
     }
 
-    /// Removes a finished request; false if it was cancelled meanwhile.
+    /// Removes a finished request; false if it was cancelled meanwhile (no response must be sent).
     private func finish(_ k: String) -> Bool {
-        tasksLock.withLock { tasks.removeValue(forKey: k) != nil }
+        tasksLock.withLock {
+            tasks.removeValue(forKey: k)
+            return cancelled.remove(k) == nil
+        }
     }
 
     // MARK: - Tools
@@ -175,7 +209,7 @@ final class MCPServer: @unchecked Sendable {
                 }
                 return success(result)
             case "preview_frame":
-                let spec = try decodeSpec(arguments)
+                let spec = try decodeSpec(arguments, allowing: ["at"])
                 let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("giftrim-preview-\(UUID().uuidString).png")
                 defer { try? FileManager.default.removeItem(at: tmp) }
                 var small = spec
@@ -196,7 +230,8 @@ final class MCPServer: @unchecked Sendable {
         }
     }
 
-    private func decodeSpec(_ arguments: [String: Any]) throws -> JobSpec {
+    private func decodeSpec(_ arguments: [String: Any], allowing extra: Set<String> = []) throws -> JobSpec {
+        try JobSchema.rejectUnknownFields(in: arguments, allowing: extra)
         var args = arguments
         args.removeValue(forKey: "at")
         let data = try JSONSerialization.data(withJSONObject: args)

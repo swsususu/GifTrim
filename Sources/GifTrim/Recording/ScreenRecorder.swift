@@ -87,6 +87,7 @@ final class ScreenRecorder: NSObject {
     // MARK: - Capture
 
     private func startCapture(screen: NSScreen, region: CGRect) async {
+        var writer: StreamWriter?
         do {
             let content: SCShareableContent
             do {
@@ -115,14 +116,18 @@ final class ScreenRecorder: NSObject {
             config.capturesAudio = false
 
             let url = AppSettings.newRecordingURL(prefix: "屏幕录制")
-            let writer = try StreamWriter(url: url, width: config.width, height: config.height)
-            let stream = SCStream(filter: filter, configuration: config, delegate: writer)
-            try stream.addStreamOutput(writer, type: .screen, sampleHandlerQueue: writer.queue)
+            let w = try StreamWriter(url: url, width: config.width, height: config.height)
+            writer = w
+            // A capture error (display unplugged, permission revoked, ...) ends the recording like Stop.
+            w.onError = { [weak self] in Task { @MainActor in await self?.stop() } }
+            let stream = SCStream(filter: filter, configuration: config, delegate: w)
+            try stream.addStreamOutput(w, type: .screen, sampleHandlerQueue: w.queue)
             try await stream.startCapture()
             self.stream = stream
-            self.output = writer
+            self.output = w
             showRecordingChrome(screen: screen, region: r)
         } catch {
+            writer?.discard()
             finish(.failure(error))
         }
     }
@@ -164,16 +169,18 @@ final class ScreenRecorder: NSObject {
     }
 
     func stop() async {
+        // Take ownership first so a second call (button + error callback) returns immediately.
         guard let stream, let output else { return }
-        try? await stream.stopCapture()
         self.stream = nil
         self.output = nil
+        let stopTime = CMClockGetTime(CMClockGetHostTimeClock())
         controlPanel?.close()
         controlPanel = nil
         frameWindow?.orderOut(nil)
         frameWindow = nil
+        try? await stream.stopCapture()
         do {
-            let url = try await output.finish()
+            let url = try await output.finish(stoppedAt: stopTime)
             NSApp.activate(ignoringOtherApps: true)
             finish(.success(url))
         } catch {
@@ -195,8 +202,12 @@ final class StreamWriter: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked
     private let writer: AVAssetWriter
     private let input: AVAssetWriterInput
     private var started = false
+    private var firstPTS: CMTime = .invalid
     private var lastPTS: CMTime = .invalid
+    private var finished = false
     private var failure: Error?
+    /// Called on the main queue when the stream stops by itself with an error.
+    var onError: (@Sendable () -> Void)?
 
     init(url: URL, width: Int, height: Int) throws {
         self.url = url
@@ -226,7 +237,7 @@ final class StreamWriter: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard type == .screen, sampleBuffer.isValid else { return }
+        guard type == .screen, sampleBuffer.isValid, !finished else { return }
         // Only "complete" frames carry new pixels.
         guard let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
               let raw = attachments.first?[.status] as? Int,
@@ -234,6 +245,7 @@ final class StreamWriter: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked
         let pts = sampleBuffer.presentationTimeStamp
         if !started {
             writer.startSession(atSourceTime: pts)
+            firstPTS = pts
             started = true
         }
         if lastPTS.isValid, pts <= lastPTS { return }
@@ -244,18 +256,32 @@ final class StreamWriter: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         queue.async { self.failure = error }
+        DispatchQueue.main.async { self.onError?() }
     }
 
-    func finish() async throws -> URL {
+    /// Cancels the writer and removes the (empty) output file.
+    func discard() {
+        queue.sync { finished = true }
+        if writer.status == .writing { writer.cancelWriting() }
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    /// `stoppedAt` is on the host clock, the same timeline as ScreenCaptureKit sample timestamps. Ending the
+    /// session there (instead of at the last frame) keeps the still tail of a static screen.
+    func finish(stoppedAt: CMTime) async throws -> URL {
         let (writer, input) = (self.writer, self.input)
-        let hasFrames: Bool = queue.sync { started }
+        let hasFrames: Bool = queue.sync { lastPTS.isValid }
         guard hasFrames else {
-            writer.cancelWriting()
-            throw RecorderError.writer("没有录到任何画面")
+            let reason = queue.sync { failure?.localizedDescription }
+            discard()
+            throw RecorderError.writer(reason ?? "没有录到任何画面")
         }
         queue.sync {
+            finished = true
             input.markAsFinished()
-            if lastPTS.isValid { writer.endSession(atSourceTime: lastPTS) }
+            var end = max(lastPTS, stoppedAt)
+            if end <= firstPTS { end = firstPTS + CMTime(value: 1, timescale: 10) }   // single frame: non-zero length
+            writer.endSession(atSourceTime: end)
         }
         await writer.finishWriting()
         if writer.status != .completed {

@@ -15,9 +15,21 @@ final class AppModel {
     var showCamera = false
 
     let screenRecorder = ScreenRecorder()
+    @ObservationIgnored private var openToken = 0
 
     init() {
         AppSettings.register()
+        Self.removeStalePreviews()
+    }
+
+    /// Deletes preview GIFs left behind by earlier sessions (crash / force quit).
+    private static func removeStalePreviews() {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory
+        guard let names = try? fm.contentsOfDirectory(atPath: dir.path) else { return }
+        for name in names where name.hasPrefix("giftrim-preview-") && name.hasSuffix(".gif") {
+            try? fm.removeItem(at: dir.appendingPathComponent(name))
+        }
     }
 
     static var openableTypes: [UTType] { MediaSource.videoTypes + MediaSource.imageTypes }
@@ -34,18 +46,22 @@ final class AppModel {
 
     func open(urls: [URL]) {
         guard !urls.isEmpty else { return }
+        openToken += 1
+        let token = openToken
         isLoading = true
         Task {
-            defer { isLoading = false }
+            // Only the latest open may clear the loading state or publish a result.
+            defer { if token == openToken { isLoading = false } }
             do {
                 let source = try await MediaSource.open(urls: urls,
                                                         stillFrameDuration: AppSettings.stillFrameDuration)
+                guard token == openToken else { return }
                 editor?.teardown()
                 editor = EditorModel(source: source)
                 NSDocumentController.shared.noteNewRecentDocumentURL(urls[0])
                 applyDebugState()
             } catch {
-                errorMessage = error.localizedDescription
+                if token == openToken { errorMessage = error.localizedDescription }
             }
         }
     }

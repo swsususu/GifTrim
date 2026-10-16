@@ -50,6 +50,13 @@ struct ExportView: View {
             .frame(width: 640, height: 420)
             .clipShape(RoundedRectangle(cornerRadius: 8))
 
+            if result != nil, let error {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                    .lineLimit(2)
+            }
+
             if let savedURL {
                 HStack {
                     Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
@@ -74,7 +81,11 @@ struct ExportView: View {
         }
         .padding(20)
         .onAppear { start() }
-        .onDisappear { task?.cancel() }
+        .onDisappear {
+            task?.cancel()
+            // The preview temp file is only needed while the sheet is open (copy/save use their own copies).
+            if let result { try? FileManager.default.removeItem(at: result.url) }
+        }
     }
 
     private var progressText: String {
@@ -125,11 +136,19 @@ struct ExportView: View {
         panel.nameFieldStringValue = base + ".gif"
         panel.directoryURL = UserDefaults.standard.url(forKey: "lastSaveDir") ?? editor.source.url.deletingLastPathComponent()
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        error = nil
         do {
-            if FileManager.default.fileExists(atPath: url.path) {
-                try FileManager.default.removeItem(at: url)
+            let fm = FileManager.default
+            if fm.fileExists(atPath: url.path) {
+                // Stage next to the target so a failed copy never destroys the existing file.
+                let staged = url.deletingLastPathComponent()
+                    .appendingPathComponent(".giftrim-save-\(UUID().uuidString).gif")
+                try fm.copyItem(at: result.url, to: staged)
+                defer { try? fm.removeItem(at: staged) }
+                _ = try fm.replaceItemAt(url, withItemAt: staged)
+            } else {
+                try fm.copyItem(at: result.url, to: url)
             }
-            try FileManager.default.copyItem(at: result.url, to: url)
             UserDefaults.standard.set(url.deletingLastPathComponent(), forKey: "lastSaveDir")
             savedURL = url
         } catch {
@@ -139,11 +158,24 @@ struct ExportView: View {
 
     private func copyToPasteboard() {
         guard let result, let data = try? Data(contentsOf: result.url) else { return }
+        // The pasteboard file URL must outlive the sheet, so use a stable copy named after the source.
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent("GifTrim-Clipboard", isDirectory: true)
+        let base = editor.source.url.deletingPathExtension().lastPathComponent
+        let file = dir.appendingPathComponent(base + ".gif")
+        do {
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            if fm.fileExists(atPath: file.path) { try fm.removeItem(at: file) }
+            try data.write(to: file)
+        } catch {
+            self.error = error.localizedDescription
+            return
+        }
         let pb = NSPasteboard.general
         pb.clearContents()
         let item = NSPasteboardItem()
         item.setData(data, forType: NSPasteboard.PasteboardType(UTType.gif.identifier))
-        item.setString(result.url.absoluteString, forType: .fileURL)
+        item.setString(file.absoluteString, forType: .fileURL)
         pb.writeObjects([item])
     }
 }

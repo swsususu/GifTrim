@@ -181,7 +181,7 @@ cd GifTrim
 make gifski   # 编译通用 libgifski.a
 make test     # 运行单元测试
 make app      # 生成 build/GifTrim.app
-make dmg      # 生成 build/GifTrim_0.1.1_universal.dmg
+make dmg      # 生成 build/GifTrim_0.1.2_universal.dmg
 ```
 
 ## 路线图

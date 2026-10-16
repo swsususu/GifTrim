@@ -25,7 +25,10 @@ public enum TestVideoGenerator {
 
         let total = Int(seconds * Double(fps))
         for i in 0..<total {
-            while !input.isReadyForMoreMediaData { try await Task.sleep(nanoseconds: 2_000_000) }
+            while !input.isReadyForMoreMediaData {
+                if writer.status == .failed { throw writer.error ?? GifTrimError.encodeFailed("writer") }
+                try await Task.sleep(nanoseconds: 2_000_000)
+            }
             guard let pool = adaptor.pixelBufferPool else { throw GifTrimError.encodeFailed("pool") }
             var pb: CVPixelBuffer?
             CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pb)
@@ -37,7 +40,9 @@ public enum TestVideoGenerator {
                                 bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)!
             draw(frame: i, total: total, in: ctx, width: Double(width), height: Double(height))
             CVPixelBufferUnlockBaseAddress(pixelBuffer, [])
-            adaptor.append(pixelBuffer, withPresentationTime: CMTime(value: CMTimeValue(i), timescale: CMTimeScale(fps)))
+            guard adaptor.append(pixelBuffer, withPresentationTime: CMTime(value: CMTimeValue(i), timescale: CMTimeScale(fps))) else {
+                throw writer.error ?? GifTrimError.encodeFailed("append")
+            }
         }
         input.markAsFinished()
         await writer.finishWriting()

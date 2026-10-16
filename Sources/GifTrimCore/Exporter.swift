@@ -15,8 +15,19 @@ enum FrameReader {
             }
             return
         }
+        // Errors thrown by `body` (encoder, frame cache, ...) must never trigger the reader fallback.
+        var bodyError: Error?
+        var done = 0
         do {
-            try await readSequential(source: source, sortedTimes: sortedTimes, body: body)
+            try await readSequential(source: source, sortedTimes: sortedTimes) { i, image in
+                do {
+                    try body(i, image)
+                    done = i + 1
+                } catch {
+                    bodyError = error
+                    throw error
+                }
+            }
         } catch let error as CancellationError {
             throw error
         } catch GifTrimError.cancelled {
@@ -24,8 +35,13 @@ enum FrameReader {
         } catch GifTrimError.encodeFailed(let msg) {
             throw GifTrimError.encodeFailed(msg)
         } catch {
-            // Fall back to the slower random-access generator (e.g. for exotic codecs).
-            try await readWithGenerator(source: source, sortedTimes: sortedTimes, body: body)
+            if let bodyError { throw bodyError }
+            // Fall back to the slower random-access generator (e.g. for exotic codecs),
+            // resuming after the frames that were already delivered.
+            let offset = done
+            try await readWithGenerator(source: source, sortedTimes: Array(sortedTimes[offset...])) { i, image in
+                try body(i + offset, image)
+            }
         }
     }
 
@@ -43,10 +59,13 @@ enum FrameReader {
         output.alwaysCopiesSampleData = false
         guard reader.canAdd(output) else { throw GifTrimError.decodeFailed("reader") }
         reader.add(output)
-        let first = max(0, sortedTimes[0] - 1)
-        let last = sortedTimes[sortedTimes.count - 1] + 1
+        // Custom frames may carry out-of-range times: keep the range inside [0, duration] and non-negative.
+        let duration = max(0, source.duration)
+        let end = min(max(sortedTimes[sortedTimes.count - 1], 0) + 1, duration)
+        let first = min(max(0, sortedTimes[0] - 1), max(0, end - 1))
         reader.timeRange = CMTimeRange(start: CMTime(seconds: first, preferredTimescale: 600),
-                                       end: CMTime(seconds: min(last, source.duration + 1), preferredTimescale: 600))
+                                       // Never past the asset end: composition outputs fail (-11841) on some files.
+                                       end: CMTime(seconds: end, preferredTimescale: 600))
         guard reader.startReading() else {
             throw GifTrimError.decodeFailed(reader.error?.localizedDescription ?? "reader")
         }
@@ -69,7 +88,8 @@ enum FrameReader {
             return (image, pts)
         }
 
-        for (i, t) in sortedTimes.enumerated() {
+        for (i, requested) in sortedTimes.enumerated() {
+            let t = min(max(requested, 0), duration)
             try Task.checkCancellation()
             try autoreleasepool {
                 if pending == nil { pending = nextSample() }
@@ -145,8 +165,15 @@ public enum Exporter {
         options.repeatCount = project.settings.repeatCount
 
         let state = ProgressState(total: total, report: progress)
-        try? FileManager.default.removeItem(at: url)
-        let encoder = try GifskiEncoder(outputURL: url, width: width, height: height, options: options) { encoded in
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue {
+            throw JobError.invalid("output path is a directory: \(url.path)")
+        }
+        // Encode into a sibling temp file and move it into place only on success, so a failed or
+        // cancelled export never destroys an existing output or leaves a half-written GIF behind.
+        let tempURL = url.deletingLastPathComponent()
+            .appendingPathComponent(".giftrim-\(UUID().uuidString).tmp")
+        let encoder = try GifskiEncoder(outputURL: tempURL, width: width, height: height, options: options) { encoded in
             state.update(encoded: encoded)
         }
 
@@ -193,10 +220,15 @@ public enum Exporter {
             }
             state.update(rendered: total)
             try await Task.detached(priority: .userInitiated) { try encoder.finish() }.value
+            if FileManager.default.fileExists(atPath: url.path) {
+                _ = try FileManager.default.replaceItemAt(url, withItemAt: tempURL)
+            } else {
+                try FileManager.default.moveItem(at: tempURL, to: url)
+            }
         } catch {
             encoder.cancel()
             try? encoder.finish()
-            try? FileManager.default.removeItem(at: url)
+            try? FileManager.default.removeItem(at: tempURL)
             if error is CancellationError { throw GifTrimError.cancelled }
             throw error
         }
@@ -230,8 +262,9 @@ public enum Exporter {
     public static func fitWidth(project: Project, source: MediaSource, targetBytes: Int64,
                                 minWidth: Int = 120) async throws -> (width: Int, bytes: Int64) {
         let maxWidth = Int(project.crop.clamped().pixelRect(in: source.size).width)
-        var lo = minWidth
-        var hi = max(minWidth, min(maxWidth, project.settings.width))
+        let hiStart = min(maxWidth, project.settings.width)
+        var lo = min(minWidth, hiStart)
+        var hi = hiStart
         var p = project
         p.settings.width = hi
         var best = try await estimateSize(project: p, source: source)

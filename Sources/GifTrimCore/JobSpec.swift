@@ -131,8 +131,30 @@ public enum JobRunner {
                           fileSizeBytes: (attrs?[.size] as? NSNumber)?.int64Value)
     }
 
+    /// Rejects NaN/infinite numbers, which would otherwise trap in later Int conversions.
+    static func requireFinite(_ values: [(String, Double?)]) throws {
+        for (name, v) in values {
+            if let v, !v.isFinite { throw JobError.invalid("\(name) must be a finite number") }
+        }
+    }
+
     /// Builds a project from a spec, validating every field.
     public static func project(_ spec: JobSpec, source: MediaSource) throws -> Project {
+        try requireFinite([("start", spec.start), ("end", spec.end), ("fps", spec.fps), ("speed", spec.speed),
+                           ("brightness", spec.brightness), ("contrast", spec.contrast),
+                           ("saturation", spec.saturation),
+                           ("crop.x", spec.crop?.x), ("crop.y", spec.crop?.y),
+                           ("crop.width", spec.crop?.width), ("crop.height", spec.crop?.height)])
+        for t in spec.texts ?? [] {
+            try requireFinite([("text.size", t.size), ("text.start", t.start), ("text.end", t.end)])
+        }
+        if let w = spec.width, w < 1 { throw JobError.invalid("width must be >= 1") }
+        if let kb = spec.targetSizeKB, kb <= 0 || kb > Int.max / 1024 {
+            throw JobError.invalid("targetSizeKB must be > 0")
+        }
+        if let c = spec.crop, c.width <= 0 || c.height <= 0 {
+            throw JobError.invalid("crop width and height must be > 0")
+        }
         let start = spec.start ?? 0
         let end = spec.end ?? source.duration
         guard start >= 0, start < source.duration else {
@@ -227,9 +249,10 @@ public enum JobRunner {
             project.settings.width = try await Exporter.fitWidth(project: project, source: source,
                                                                  targetBytes: Int64(kb) * 1024).width
         }
-        let output = spec.output.map(expand) ?? source.url.deletingPathExtension().appendingPathExtension("gif")
-        if output.standardizedFileURL == source.url.standardizedFileURL {
-            throw JobError.invalid("output must differ from the input file")
+        let output = try spec.output.map { try outputURL($0) } ?? source.url.deletingPathExtension().appendingPathExtension("gif")
+        try validateOutput(output, inputs: spec.inputs.map(expand))
+        guard output.pathExtension.lowercased() == "gif" else {
+            throw JobError.invalid("output must have a .gif extension")
         }
         try FileManager.default.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
         let r = try await Exporter.export(project: project, source: source, to: output, progress: progress)
@@ -242,16 +265,54 @@ public enum JobRunner {
     public static func snapshot(_ spec: JobSpec, at time: Double?, to url: URL) async throws -> (width: Int, height: Int) {
         let source = try await open(spec)
         let project = try project(spec, source: source)
+        try requireFinite([("at", time)])
+        try validateOutput(url, inputs: spec.inputs.map(expand))
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         let t = time ?? (project.trimStart + project.trimEnd) / 2
         let cg = try await source.image(at: t)
         let compositor = Compositor(project: project, sourceSize: source.size)
         guard let rendered = compositor.renderImage(.init(cgImage: cg), time: t),
               let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil) else {
-            throw GifTrimError.encodeFailed("snapshot")
+            throw JobError.invalid("无法写入截图：\(url.path)")
         }
         CGImageDestinationAddImage(dest, rendered, nil)
-        guard CGImageDestinationFinalize(dest) else { throw GifTrimError.encodeFailed("snapshot") }
+        guard CGImageDestinationFinalize(dest) else { throw JobError.invalid("无法写入截图：\(url.path)") }
         return (rendered.width, rendered.height)
+    }
+
+    // MARK: - Output validation
+
+    /// Expands an output path; an empty path would otherwise resolve to the working directory.
+    static func outputURL(_ path: String) throws -> URL {
+        guard !path.trimmingCharacters(in: .whitespaces).isEmpty else {
+            throw JobError.invalid("output path must not be empty")
+        }
+        return expand(path)
+    }
+
+    /// Rejects directories and any output that is the same file as one of the inputs
+    /// (case-insensitive paths, symlinks and hard links included).
+    static func validateOutput(_ output: URL, inputs: [URL]) throws {
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: output.path, isDirectory: &isDirectory), isDirectory.boolValue {
+            throw JobError.invalid("output path is a directory: \(output.path)")
+        }
+        for input in inputs where sameFile(output, input) {
+            throw JobError.invalid("output must differ from the input file")
+        }
+    }
+
+    static func sameFile(_ a: URL, _ b: URL) -> Bool {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: a.path), fm.fileExists(atPath: b.path),
+           let ia = try? a.resourceValues(forKeys: [.fileResourceIdentifierKey]).fileResourceIdentifier,
+           let ib = try? b.resourceValues(forKeys: [.fileResourceIdentifierKey]).fileResourceIdentifier,
+           ia.isEqual(ib) {
+            return true
+        }
+        let pa = a.resolvingSymlinksInPath().standardizedFileURL.path
+        let pb = b.resolvingSymlinksInPath().standardizedFileURL.path
+        return pa.caseInsensitiveCompare(pb) == .orderedSame
     }
 
     // MARK: - Parsing helpers

@@ -72,11 +72,11 @@ public struct NormalizedRect: Codable, Hashable, Sendable {
 
     /// Pixel rect (top-left origin) for a given image size, rounded to whole pixels.
     public func pixelRect(in size: CGSize) -> CGRect {
-        let px = (x * size.width).rounded()
-        let py = (y * size.height).rounded()
+        let px = min(max((x * size.width).rounded(), 0), max(0, size.width - 1))
+        let py = min(max((y * size.height).rounded(), 0), max(0, size.height - 1))
         let pw = max(1, (width * size.width).rounded())
         let ph = max(1, (height * size.height).rounded())
-        return CGRect(x: px, y: py, width: min(pw, size.width - px), height: min(ph, size.height - py))
+        return CGRect(x: px, y: py, width: max(1, min(pw, size.width - px)), height: max(1, min(ph, size.height - py)))
     }
 
     /// Returns a centered rect of the given aspect ratio (width / height) inside a frame of `size`.

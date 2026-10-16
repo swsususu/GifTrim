@@ -11,9 +11,9 @@ import GifTrimCore
 //   giftrim schema                                  print the JobSpec JSON schema
 //   giftrim make-test-video out.mp4 [--seconds n]
 
-let version = "0.1.0"
-
-func usage() -> Never {
+/// Prints usage and exits: `help` → stdout, exit 0; otherwise a usage error (exit 2),
+/// reported as a single `{"error": ...}` JSON object on stdout when `--json` is set.
+func usage(_ error: String? = nil, help: Bool = false) -> Never {
     let text = """
     giftrim \(version) — high-quality GIFs from video, animated images or image sequences (gifski inside).
 
@@ -37,11 +37,14 @@ func usage() -> Never {
       --motion <1-100>         Motion quality (lower = smaller)
       --speed <x>              Playback speed (default 1)
       --mode <m>               forward | reverse | bounce
-      --loop <n>               0 = forever (default), -1 = once, n = repeat n times
+      --loop, --repeat <n>     0 = forever (default), -1 = once, n = repeat n times
       --crop <x,y,w,h>         Crop in source pixels
       --aspect <w:h>           Center-crop to an aspect ratio, e.g. 1:1
       --text <str>             Caption (repeatable); --text-position top|center|bottom, --text-size 0.12
       --effect <name>          \(ColorEffect.allCases.map(\.rawValue).joined(separator: ", "))
+      --brightness <-1..1>     Brightness (default 0)
+      --contrast <0.25..4>     Contrast (default 1)
+      --saturation <0..3>      Saturation (default 1, 0 = grayscale)
       --target-size <KB>       Pick the largest width that fits this size
       --fast                   Faster encoding, slightly lower quality
       --json                   Print a machine-readable JSON result on stdout (progress stays on stderr)
@@ -53,30 +56,46 @@ func usage() -> Never {
       giftrim frames/*.png -o anim.gif --fps 8
       echo '{"inputs":["a.mov"],"output":"a.gif","texts":[{"text":"Hi"}]}' | giftrim run -
     """
-    FileHandle.standardError.write(Data((text + "\n").utf8))
+    if help {
+        print(text)
+        exit(0)
+    }
+    if json {
+        emit(ErrorOutput(error: error ?? "missing input (see giftrim --help)"))
+    } else {
+        if let error { FileHandle.standardError.write(Data("error: \(error)\n\n".utf8)) }
+        FileHandle.standardError.write(Data((text + "\n").utf8))
+    }
     exit(2)
 }
 
 var args = Array(CommandLine.arguments.dropFirst())
-if args.isEmpty || args.contains("-h") || args.contains("--help") { usage() }
-if args == ["--version"] || args == ["-v"] { print(version); exit(0) }
 
-func take(_ names: String...) -> String? {
-    for name in names {
-        if let i = args.firstIndex(of: name), i + 1 < args.count {
-            let v = args[i + 1]
-            args.removeSubrange(i...(i + 1))
-            return v
-        }
-    }
-    return nil
+/// True for `-x` / `--xyz`, false for values such as `-1`, `-0.5` or a lone `-`.
+func isFlagLike(_ s: String) -> Bool {
+    s.count > 1 && s.hasPrefix("-") && Double(s) == nil && !(s.dropFirst().first?.isWhitespace ?? false)
 }
 
-func takeAll(_ name: String) -> [String] {
+/// Removes every `name value` pair from `args` and returns the values.
+func takeValues(_ names: [String]) throws -> [String] {
     var out: [String] = []
-    while let v = take(name) { out.append(v) }
+    while let i = args.firstIndex(where: { names.contains($0) }) {
+        guard i + 1 < args.count, !isFlagLike(args[i + 1]) else {
+            throw JobError.invalid("\(args[i]) requires a value")
+        }
+        out.append(args[i + 1])
+        args.removeSubrange(i...(i + 1))
+    }
     return out
 }
+
+func take(_ names: String...) throws -> String? {
+    let values = try takeValues(names)
+    guard values.count <= 1 else { throw JobError.invalid("\(names[0]) specified more than once") }
+    return values.first
+}
+
+func takeAll(_ name: String) throws -> [String] { try takeValues([name]) }
 
 func flag(_ names: String...) -> Bool {
     var found = false
@@ -90,7 +109,7 @@ func flag(_ names: String...) -> Bool {
 }
 
 func number<T: LosslessStringConvertible>(_ name: String, _ type: T.Type) throws -> T? {
-    guard let raw = take(name) else { return nil }
+    guard let raw = try take(name) else { return nil }
     guard let v = T(raw) else { throw JobError.invalid("\(name) expects a number, got \"\(raw)\"") }
     return v
 }
@@ -102,18 +121,57 @@ let encoder: JSONEncoder = {
 }()
 
 func emit<T: Encodable>(_ value: T) {
-    if let data = try? encoder.encode(value) {
-        FileHandle.standardOutput.write(data)
-        FileHandle.standardOutput.write(Data("\n".utf8))
+    guard let data = try? encoder.encode(value) else {
+        FileHandle.standardOutput.write(Data("{\"error\":\"encode failed\"}\n".utf8))
+        exit(1)
     }
+    FileHandle.standardOutput.write(data)
+    FileHandle.standardOutput.write(Data("\n".utf8))
 }
 
 func stderr(_ s: String) { FileHandle.standardError.write(Data(s.utf8)) }
 
+struct ErrorOutput: Encodable { let error: String }
+
+// --json is parsed first so that usage errors can honor it.
+let json = flag("--json")
+let quiet = flag("-q", "--quiet") || json
+
+/// Flags that consume the next argument; used to tell `--help` apart from a flag value (`--text --help`).
+let valueFlags: Set<String> = [
+    "-o", "--output", "--start", "--end", "--width", "--fps", "--quality", "--lossy", "--motion", "--speed",
+    "--mode", "--loop", "--repeat", "--crop", "--aspect", "--effect", "--brightness", "--contrast",
+    "--saturation", "--text", "--text-position", "--text-size", "--text-color", "--target-size", "--at", "--seconds",
+]
+
+/// True when one of `names` appears as a standalone argument in flag position.
+func hasStandalone(_ names: Set<String>) -> Bool {
+    var i = 0
+    while i < args.count {
+        if names.contains(args[i]) { return true }
+        i += valueFlags.contains(args[i]) ? 2 : 1
+    }
+    return false
+}
+
+if hasStandalone(["-h", "--help"]) { usage(help: true) }
+if hasStandalone(["--version", "-v"]) {
+    if json { emit(["version": version]) } else { print(version) }
+    exit(0)
+}
+if args.isEmpty { usage() }
+
+/// Throws for any leftover `-x` / `--xyz` argument.
+func rejectUnknownOptions() throws {
+    if let unknown = args.first(where: isFlagLike) {
+        throw JobError.invalid("unknown option \(unknown) (see giftrim --help)")
+    }
+}
+
 /// Parses the shared option flags into a JobSpec (remaining positional args are inputs).
 func parseSpec() throws -> JobSpec {
     var spec = JobSpec(inputs: [])
-    spec.output = take("-o", "--output")
+    spec.output = try take("-o", "--output")
     spec.start = try number("--start", Double.self)
     spec.end = try number("--end", Double.self)
     spec.width = try number("--width", Int.self)
@@ -122,24 +180,24 @@ func parseSpec() throws -> JobSpec {
     spec.lossy = try number("--lossy", Int.self)
     spec.motion = try number("--motion", Int.self)
     spec.speed = try number("--speed", Double.self)
-    spec.mode = take("--mode")
+    spec.mode = try take("--mode")
     spec.loop = try number("--loop", Int.self) ?? number("--repeat", Int.self)
-    if let c = take("--crop") {
+    if let c = try take("--crop") {
         let v = c.split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
         guard v.count == 4 else { throw JobError.invalid("--crop expects x,y,w,h in pixels") }
         // Values all <= 1 are treated as normalized fractions (backwards compatible).
         spec.crop = .init(x: v[0], y: v[1], width: v[2], height: v[3])
         if v.allSatisfy({ $0 <= 1 }) { spec.crop = nil; normalizedCrop = v }
     }
-    spec.aspect = take("--aspect")
-    spec.effect = take("--effect")
+    spec.aspect = try take("--aspect")
+    spec.effect = try take("--effect")
     spec.brightness = try number("--brightness", Double.self)
     spec.contrast = try number("--contrast", Double.self)
     spec.saturation = try number("--saturation", Double.self)
-    let position = take("--text-position")
+    let position = try take("--text-position")
     let size = try number("--text-size", Double.self)
-    let color = take("--text-color")
-    let texts = takeAll("--text")
+    let color = try take("--text-color")
+    let texts = try takeAll("--text")
     if !texts.isEmpty {
         spec.texts = texts.map { t in
             var s = JobSpec.TextSpec(text: t)
@@ -151,9 +209,7 @@ func parseSpec() throws -> JobSpec {
     }
     spec.targetSizeKB = try number("--target-size", Int.self)
     spec.fast = flag("--fast") ? true : nil
-    if let unknown = args.first(where: { $0.hasPrefix("--") }) {
-        throw JobError.invalid("unknown option \(unknown) (see giftrim --help)")
-    }
+    try rejectUnknownOptions()
     spec.inputs = args
     return spec
 }
@@ -168,13 +224,10 @@ func resolveNormalizedCrop(_ spec: inout JobSpec) async throws {
                       width: v[2] * source.size.width, height: v[3] * source.size.height)
 }
 
-struct ErrorOutput: Encodable { let error: String }
+struct SnapshotOutput: Encodable { let output: String; let width: Int; let height: Int }
 
 let semaphore = DispatchSemaphore(value: 0)
 var exitCode: Int32 = 0
-let json = flag("--json")
-let quiet = flag("-q", "--quiet") || json
-
 Task {
     defer { semaphore.signal() }
     do {
@@ -183,7 +236,8 @@ Task {
         case "make-test-video", "--make-test-video":
             args.removeFirst()
             let seconds = try number("--seconds", Double.self) ?? 3
-            guard let out = args.first else { usage() }
+            try rejectUnknownOptions()
+            guard let out = args.first else { usage("make-test-video needs an output path") }
             try await TestVideoGenerator.make(url: URL(fileURLWithPath: out), seconds: seconds)
             if json { emit(["output": out]) } else { print("wrote \(out)") }
 
@@ -195,7 +249,8 @@ Task {
 
         case "info":
             args.removeFirst()
-            guard let path = args.first else { throw JobError.invalid("info needs a file") }
+            try rejectUnknownOptions()
+            guard let path = args.first else { usage("info needs a file") }
             let info = JobRunner.info(try await JobRunner.open(JobSpec(inputs: [path])))
             if json {
                 emit(info)
@@ -224,21 +279,23 @@ Task {
             var spec = try parseSpec()
             try await resolveNormalizedCrop(&spec)
             let out = spec.output ?? "snapshot.png"
-            let r = try await JobRunner.snapshot(spec, at: at, to: URL(fileURLWithPath: (out as NSString).expandingTildeInPath))
-            if json { emit(["output": out, "width": "\(r.width)", "height": "\(r.height)"]) } else { print("wrote \(out) (\(r.width)x\(r.height))") }
+            let url = URL(fileURLWithPath: (out as NSString).expandingTildeInPath)
+            let r = try await JobRunner.snapshot(spec, at: at, to: url)
+            if json { emit(SnapshotOutput(output: url.standardizedFileURL.path, width: r.width, height: r.height)) } else { print("wrote \(out) (\(r.width)x\(r.height))") }
 
         case "run":
             args.removeFirst()
-            guard let path = args.first else { throw JobError.invalid("run needs a job file or '-'") }
+            guard let path = args.first else { usage("run needs a job file or '-'") }
             let data = path == "-" ? FileHandle.standardInput.readDataToEndOfFile()
                 : try Data(contentsOf: URL(fileURLWithPath: path))
             let spec = try JSONDecoder().decode(JobSpec.self, from: data)
+            try JobSchema.rejectUnknownFields(in: data)
             try await convert(spec)
 
         default:
             if command == "convert" { args.removeFirst() }
             var spec = try parseSpec()
-            guard !spec.inputs.isEmpty else { usage() }
+            guard !spec.inputs.isEmpty else { usage("no input files") }
             try await resolveNormalizedCrop(&spec)
             try await convert(spec)
         }

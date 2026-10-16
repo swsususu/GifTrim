@@ -63,9 +63,11 @@ actor VideoFixture {
         #expect(abs(FramePlanner.totalDuration(q) - 1.0) < 0.011)
     }
 
-    @Test func presentationTimesStartAtZero() {
+    @Test func presentationTimesOffsetByLastDelay() {
         let frames = [PlannedFrame(sourceTime: 1, delay: 0.1), PlannedFrame(sourceTime: 2, delay: 0.2)]
-        #expect(FramePlanner.presentationTimes(frames) == [0, 0.1])
+        // gifski treats a first PTS > 0 as the last frame's delay, so all PTS are offset by it.
+        let pts = FramePlanner.presentationTimes(frames)
+        #expect(pts.count == 2 && abs(pts[0] - 0.2) < 1e-9 && abs(pts[1] - 0.3) < 1e-9)
     }
 
     @Test func planRespectsTrimFpsSpeedAndModes() async throws {
@@ -116,6 +118,23 @@ actor VideoFixture {
         let r = NormalizedRect.centered(aspect: 1, in: CGSize(width: 200, height: 100))
         let px = r.pixelRect(in: CGSize(width: 200, height: 100))
         #expect(px.width == 100 && px.height == 100 && px.minX == 50)
+    }
+
+    @Test func pixelRectStaysInsideAtEdges() {
+        let size = CGSize(width: 200, height: 100)
+        let edge = NormalizedRect(x: 1, y: 1, width: 0.001, height: 0.001).pixelRect(in: size)
+        #expect(edge.width >= 1 && edge.height >= 1)
+        #expect(edge.maxX <= size.width && edge.maxY <= size.height)
+        let beyond = NormalizedRect(x: 1.5, y: -1, width: 0.5, height: 0.5).pixelRect(in: size)
+        #expect(beyond.width >= 1 && beyond.height >= 1)
+        #expect(beyond.minX >= 0 && beyond.maxX <= size.width && beyond.minY >= 0 && beyond.maxY <= size.height)
+    }
+
+    @Test func textLinesTreatCRLFAsOneBreak() {
+        let t = TextOverlay(text: "a\r\nb")
+        let one = Compositor.textBounds(TextOverlay(text: "a\nb"), size: CGSize(width: 400, height: 200))
+        let crlf = Compositor.textBounds(t, size: CGSize(width: 400, height: 200))
+        #expect(abs(one.height - crlf.height) < 1e-9)
     }
 
     @Test func textBoundsUseTopLeftOrigin() {
@@ -204,6 +223,106 @@ actor VideoFixture {
         #expect(ratio > 0.5 && ratio < 2, "estimate \(est.bytes) vs actual \(actual)")
     }
 
+    /// Writes a GIF whose frames have the given delays (seconds).
+    static func writeGIF(_ url: URL, delays: [Double]) throws {
+        let dest = try #require(CGImageDestinationCreateWithURL(url as CFURL, "com.compuserve.gif" as CFString, delays.count, nil))
+        for (i, d) in delays.enumerated() {
+            var data = [UInt8](repeating: UInt8(40 * i), count: 16 * 16 * 4)
+            let ctx = try #require(CGContext(data: &data, width: 16, height: 16, bitsPerComponent: 8, bytesPerRow: 64,
+                                             space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+            ctx.setFillColor(CGColor(srgbRed: Double(i) / 3, green: 0.5, blue: 0.2, alpha: 1))
+            ctx.fill(CGRect(x: 0, y: 0, width: 16, height: 16))
+            let image = try #require(ctx.makeImage())
+            let props = [kCGImagePropertyGIFDictionary: [kCGImagePropertyGIFUnclampedDelayTime: d]] as CFDictionary
+            CGImageDestinationAddImage(dest, image, props)
+        }
+        #expect(CGImageDestinationFinalize(dest))
+    }
+
+    /// Per-frame unclamped delays as stored in the file.
+    static func rawDelays(_ url: URL) -> [Double] {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return [] }
+        return (0..<CGImageSourceGetCount(src)).map { i in
+            let props = CGImageSourceCopyPropertiesAtIndex(src, i, nil) as? [CFString: Any]
+            let gif = props?[kCGImagePropertyGIFDictionary] as? [CFString: Any]
+            return (gif?[kCGImagePropertyGIFUnclampedDelayTime] as? Double) ?? 0
+        }
+    }
+
+    @Test func lastFrameDelayIsPreserved() async throws {
+        let input = Fixtures.tempGIF()
+        let out = Fixtures.tempGIF()
+        defer { try? FileManager.default.removeItem(at: input); try? FileManager.default.removeItem(at: out) }
+        try Self.writeGIF(input, delays: [1.0, 1.0, 1.5])
+        let source = try await MediaSource.open(urls: [input])
+        var p = Project(sourceURL: input, trimStart: 0, trimEnd: source.duration)
+        p.settings.width = 16
+        _ = try await Exporter.export(project: p, source: source, to: out)
+        let delays = Self.rawDelays(out)
+        #expect(delays.count == 3)
+        #expect(zip(delays, [1.0, 1.0, 1.5]).allSatisfy { abs($0 - $1) < 0.011 }, "got \(delays)")
+    }
+
+    @Test func singleImageKeepsPlannedDuration() async throws {
+        let png = FileManager.default.temporaryDirectory.appendingPathComponent("giftrim-test-\(UUID().uuidString).png")
+        let out = Fixtures.tempGIF()
+        defer { try? FileManager.default.removeItem(at: png); try? FileManager.default.removeItem(at: out) }
+        let ctx = try #require(CGContext(data: nil, width: 16, height: 16, bitsPerComponent: 8, bytesPerRow: 0,
+                                         space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                         bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        ctx.setFillColor(CGColor(srgbRed: 1, green: 0, blue: 0, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: 16, height: 16))
+        let dest = try #require(CGImageDestinationCreateWithURL(png as CFURL, "public.png" as CFString, 1, nil))
+        CGImageDestinationAddImage(dest, try #require(ctx.makeImage()), nil)
+        #expect(CGImageDestinationFinalize(dest))
+
+        var spec = JobSpec(inputs: [png.path])
+        spec.output = out.path
+        spec.width = 16
+        _ = try await JobRunner.run(spec)
+        let delays = Self.rawDelays(out)
+        #expect(delays.count == 1 && abs(delays[0] - 0.5) < 0.011, "got \(delays)")
+    }
+
+    @Test func directoryOutputIsRejectedWithoutDeletion() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("giftrim-test-dir-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let keep = dir.appendingPathComponent("keep.txt")
+        try Data("x".utf8).write(to: keep)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let video = try await Fixtures.video
+
+        var spec = JobSpec(inputs: [video.path])
+        spec.output = dir.path
+        spec.end = 0.3
+        await #expect(throws: (any Error).self) { try await JobRunner.run(spec) }
+        #expect(FileManager.default.fileExists(atPath: keep.path))
+
+        // Exporter itself must never remove a directory either.
+        let source = try await MediaSource.open(urls: [video])
+        let p = Project(sourceURL: video, trimStart: 0, trimEnd: 0.3)
+        await #expect(throws: (any Error).self) { try await Exporter.export(project: p, source: source, to: dir) }
+        #expect(FileManager.default.fileExists(atPath: keep.path))
+    }
+
+    @Test func failedExportKeepsExistingOutput() async throws {
+        let out = Fixtures.tempGIF()
+        defer { try? FileManager.default.removeItem(at: out) }
+        try Data("old".utf8).write(to: out)
+        let source = try await MediaSource.open(urls: [try await Fixtures.video])
+        var p = Project(sourceURL: source.url, trimStart: 0, trimEnd: 2)
+        p.settings.width = 320
+        p.settings.fps = 30
+        let task = Task { try await Exporter.export(project: p, source: source, to: out) }
+        task.cancel()
+        await #expect(throws: (any Error).self) { try await task.value }
+        #expect(try Data(contentsOf: out) == Data("old".utf8))
+        let leftovers = try FileManager.default.contentsOfDirectory(atPath: out.deletingLastPathComponent().path)
+            .filter { $0.hasPrefix(".giftrim-") && $0.hasSuffix(".tmp") }
+        #expect(leftovers.isEmpty)
+    }
+
     @Test func cancellationStopsExport() async throws {
         let source = try await MediaSource.open(urls: [try await Fixtures.video])
         var p = Project(sourceURL: source.url, trimStart: 0, trimEnd: 2)
@@ -235,6 +354,37 @@ actor VideoFixture {
         spec.mode = nil
         spec.start = 5
         #expect(throws: JobError.self) { try JobRunner.project(spec, source: source) }
+    }
+
+    @Test func rejectsInvalidNumbers() async throws {
+        let source = try await MediaSource.open(urls: [try await Fixtures.video])
+        var spec = JobSpec(inputs: [try await Fixtures.video.path])
+        spec.width = 0
+        #expect(throws: JobError.self) { try JobRunner.project(spec, source: source) }
+        spec.width = nil
+        spec.targetSizeKB = 0
+        #expect(throws: JobError.self) { try JobRunner.project(spec, source: source) }
+        spec.targetSizeKB = nil
+        spec.crop = JobSpec.PixelRect(x: 0, y: 0, width: 0, height: 10)
+        #expect(throws: JobError.self) { try JobRunner.project(spec, source: source) }
+        spec.crop = nil
+        spec.fps = .nan
+        #expect(throws: JobError.self) { try JobRunner.project(spec, source: source) }
+        spec.fps = nil
+        spec.brightness = .infinity
+        #expect(throws: JobError.self) { try JobRunner.project(spec, source: source) }
+    }
+
+    @Test func rejectsOutputSameAsInputIgnoringCase() async throws {
+        let video = try await Fixtures.video
+        var spec = JobSpec(inputs: [video.path])
+        spec.output = video.path.uppercased()
+        spec.end = 0.3
+        await #expect(throws: JobError.self) { try await JobRunner.run(spec) }
+        #expect(FileManager.default.fileExists(atPath: video.path))
+        // Snapshot shares the check.
+        await #expect(throws: JobError.self) { try await JobRunner.snapshot(spec, at: 0.1, to: video) }
+        #expect(FileManager.default.fileExists(atPath: video.path))
     }
 
     @Test func parsesColorsAndAspects() throws {
